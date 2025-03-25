@@ -24,7 +24,7 @@ void remove_newline(char *str) {
     }
 }
 
-// fucntion to Send message and handle error
+// function to Send message and handle error
 void send_message(int socket, const char *msg) {
     if (send(socket, msg, strlen(msg), 0) < 0) {
         perror("Send failed");
@@ -71,6 +71,7 @@ int main() {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
+
     //step2: configure server address
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;

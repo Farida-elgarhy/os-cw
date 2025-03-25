@@ -69,14 +69,12 @@ int main() {
 
     //  Authentication loop 
     while (1) {
-        // Prompt for username
         read_message(sock, buffer, BUFFER_SIZE, "Failed to receive username");
         printf("%s", buffer);
         fgets(username, sizeof(username), stdin);
         remove_newline(username);
         send_message(sock, username, "Failed to send username");
 
-        // Prompt for password
         read_message(sock, buffer, BUFFER_SIZE, "Failed to receive password ");
         printf("%s", buffer);
         fgets(password, sizeof(password), stdin);
