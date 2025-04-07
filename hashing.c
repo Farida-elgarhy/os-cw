@@ -38,8 +38,8 @@ int main() {
 
     // Generate random salt
     if (!RAND_bytes(salt_bytes, sizeof(salt_bytes))) {
-        fprintf(stderr, "Error generating random salt\n");
-        exit(1);
+        perror("Random bytes generation failed");
+        exit(EXIT_FAILURE);
     }
     
     // Convert salt to hex
