@@ -3,16 +3,16 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-
+#include <openssl/sha.h>
 #define PORT 8080
 #define BUFFER_SIZE 1024
 
 // User credentials 2D array
-const char *userstable[][2] = {
-    {"farida", "farida@!"},
-    {"user", "p@ssword2"},
-    {"admin", "@dmin"}
-};
+//const char *userstable[][2] = {
+//    {"farida", "farida@!"},
+//    {"user", "p@ssword2"},
+//    {"admin", "@dmin"}
+//};
 
 // function to remove newline
 void remove_newline(char *str) {
@@ -45,15 +45,83 @@ void read_message(int socket, char *buffer, size_t size, const char *error_msg) 
     remove_newline(buffer);
 }
 
+#define SALT_LENGTH 16
+#define HASH_LENGTH SHA256_DIGEST_LENGTH
+
+// Convert binary to hex
+void to_hex(const unsigned char *in, size_t len, char *out) {
+    for (size_t i = 0; i < len; i++) {
+        sprintf(out + (i * 2), "%02x", in[i]);
+    }
+    out[len * 2] = '\0';
+}
+
+// Function to hash a password with salt
+void hash_password(const char *password, const char *salt, char *hash_out) {
+    char salted[512];
+    unsigned char hash[HASH_LENGTH];
+    
+    // Combine salt and password
+    sprintf(salted, "%s%s", salt, password);
+    
+    // Hash the salted password
+    SHA256((unsigned char *)salted, strlen(salted), hash);
+    
+    // Convert hash to hex
+    to_hex(hash, HASH_LENGTH, hash_out);
+}
+
 // Authentication function
 int authenticate(const char username[], const char password[]) {
-    int total_users = sizeof(userstable) / sizeof(userstable[0]);
-    for (int i = 0; i < total_users; i++) {
-        if (strcmp(username, userstable[i][0]) == 0 &&
-            strcmp(password, userstable[i][1]) == 0) {
-            return 1;
+    FILE *file = fopen("credentials.txt", "r");
+    if (file == NULL) return 0;
+
+    char buffer[BUFFER_SIZE] = {0};
+    char stored_username[50];
+    char stored_salt[33];    // 32 hex chars + null
+    char stored_hash[65];    // 64 hex chars + null
+    int i;
+
+    while (fgets(buffer, sizeof(buffer), file)) {
+        // Get username (copy until space)
+        for(i = 0; buffer[i] != ' ' && buffer[i] != '\0'; i++) {
+            stored_username[i] = buffer[i];
+        }
+        stored_username[i] = '\0';
+        i++; // skip space
+
+        // Get salt (copy until next space)
+        int j;
+        for(j = 0; buffer[i] != ' ' && buffer[i] != '\0'; i++, j++) {
+            stored_salt[j] = buffer[i];
+        }
+        stored_salt[j] = '\0';
+        i++; // skip space
+
+        // Get hash (copy until newline)
+        for(j = 0; buffer[i] != '\n' && buffer[i] != '\0'; i++, j++) {
+            stored_hash[j] = buffer[i];
+        }
+        stored_hash[j] = '\0';
+
+
+        // If username matches, check password
+        if (strcmp(username, stored_username) == 0) {
+            printf("Found matching username: %s\n", username);
+            char computed_hash[65];
+            hash_password(password, stored_salt, computed_hash);
+            printf("Input password: %s\n", password);
+            printf("Stored  hash: %s\n", stored_hash);
+            printf("Computed hash: %s\n", computed_hash);
+            
+            if (strcmp(computed_hash, stored_hash) == 0) {
+                fclose(file);
+                return 1;
+            }
+            break;  // Username found but wrong password
         }
     }
+    fclose(file);
     return 0;
 }
 
@@ -65,7 +133,7 @@ int main() {
     char username[50], password[50];
     int attempts = 0;
     const int maximum_attempts = 3;
-
+    
     // step1: Create socket 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Socket failed");
