@@ -6,28 +6,12 @@
 #include <openssl/sha.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <pthread.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
 #define SALT_LENGTH 16
 #define HASH_LENGTH SHA256_DIGEST_LENGTH
-
-// User credentials 2D array
-//const char *userstable[][2] = {
-//    {"farida", "farida@!"},
-//    {"user", "p@ssword2"},
-//    {"admin", "@dmin"}
-//};
-
-// function to remove newline
-//void remove_newline(char *str) {
-//    for (int i = 0; str[i] != '\0'; i++) {
-//        if (str[i] == '\n') {
-//            str[i] = '\0';
-//            break;
-//        }
-//    }
-//}
 
 // function to Send message and handle error
 void send_message(int socket, unsigned char *data, int len) {
@@ -95,14 +79,14 @@ int authenticate(const char username[], const char password[]) {
     
     while (fgets(buffer, sizeof(buffer), file)) {
         int i;
-        // Get username 
+        // Get username (copy until space)
         for(i = 0; buffer[i] != ' ' && buffer[i] != '\0'; i++) {
             stored_username[i] = buffer[i];
         }
         stored_username[i] = '\0';
         i++; // skip space
 
-        // Get salt
+        // Get salt (copy until next space)
         int j;
         for(j = 0; buffer[i] != ' ' && buffer[i] != '\0'; i++, j++) {
             stored_salt[j] = buffer[i];
@@ -110,7 +94,7 @@ int authenticate(const char username[], const char password[]) {
         stored_salt[j] = '\0';
         i++; // skip space
 
-        // Get hash 
+        // Get hash (copy until newline)
         for(j = 0; buffer[i] != '\n' && buffer[i] != '\0'; i++, j++) {
             stored_hash[j] = buffer[i];
         }
@@ -123,8 +107,7 @@ int authenticate(const char username[], const char password[]) {
             hash_password(password, stored_salt, computed_hash);
             printf("Input password: %s\n", password);
             printf("Stored  hash: %s\n", stored_hash);
-            printf("Computed hash: %s\n", computed_hash);
-            
+            printf("Computed hash: %s\n", computed_hash);            
             if (strcmp(computed_hash, stored_hash) == 0) {
                 fclose(file);
                 return 1;
@@ -143,7 +126,7 @@ int encrypt(unsigned char *plaintext, unsigned char *ciphertext,
     int bytes_written = 0;
     int final_bytes = 0;
 
-    //  AES-256  stronger encryption
+    // Use AES-256 instead of AES-128 for stronger encryption
     EVP_EncryptInit_ex(encryption_context, EVP_aes_256_cbc(), NULL, key, iv);
     EVP_EncryptUpdate(encryption_context, ciphertext, &bytes_written, plaintext, strlen((char *)plaintext));
     EVP_EncryptFinal_ex(encryption_context, ciphertext + bytes_written, &final_bytes);
@@ -169,129 +152,139 @@ int decrypt(unsigned char *ciphertext, int ciphertext_len, unsigned char *plaint
     return bytes_written + final_bytes;
 }
 
-int main() {
-    int server_fd, new_socket;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
+// Thread function to handle client connection
+void* handle_client(void* arg) {
+    int client_socket = *(int*)arg;
     unsigned char buffer[BUFFER_SIZE] = {0};
     char username[50], password[50];
     int attempts = 0;
     const int maximum_attempts = 3;
-    int encrypted_len;
+    char hex[256];
     unsigned char key[16], iv[16];
     unsigned char ciphertext[128], decrypted_message[128];
-    char hex[256];
     
-    printf("\n=== Secure Server Started ===\n");
-
-    // Generate random key and IV
+    // Generate random key and IV for this client
     if (!RAND_bytes(key, 16) || !RAND_bytes(iv, 16)) {
         perror("Failed to generate random key/IV");
-        exit(EXIT_FAILURE);
+        close(client_socket);
+        free(arg);
+        return NULL;
     }
 
-    printf("Generated random key and IV\n");
-    
-    // step1: Create socket 
+    // Send the key and IV to client
+    if (send(client_socket, key, 16, 0) != 16 || send(client_socket, iv, 16, 0) != 16) {
+        perror("Failed to send key/IV");
+        close(client_socket);
+        free(arg);
+        return NULL;
+    }
+
+    // Authentication loop
+    while (attempts < maximum_attempts) {
+        // Send and receive encrypted username
+        int encrypted_len = encrypt((unsigned char *)"Enter username: ", ciphertext, key, iv);
+        send_message(client_socket, ciphertext, encrypted_len);
+        int received_len = read_message(client_socket, buffer, BUFFER_SIZE, "Read username failed");
+        decrypt(buffer, received_len, username, key, iv);
+        printf("Client %d - Username received: %s\n", client_socket, username);
+
+        // Send and receive encrypted password
+        encrypted_len = encrypt((unsigned char *)"Enter password: ", ciphertext, key, iv);
+        send_message(client_socket, ciphertext, encrypted_len);
+        received_len = read_message(client_socket, buffer, BUFFER_SIZE, "Read password failed");
+        decrypt(buffer, received_len, password, key, iv);
+        printf("Client %d - Password received\n", client_socket);
+
+        if (authenticate(username, password)) {
+            encrypted_len = encrypt((unsigned char *)"Authentication successful", ciphertext, key, iv);
+            send_message(client_socket, ciphertext, encrypted_len);
+            printf("Client %d authenticated successfully\n", client_socket);
+
+            // Read and decrypt final client message
+            received_len = read_message(client_socket, buffer, BUFFER_SIZE, "Read client message");
+            decrypt(buffer, received_len, decrypted_message, key, iv);
+            printf("Client %d message: %s\n", client_socket, decrypted_message);
+
+            encrypted_len = encrypt((unsigned char *)"Message received", ciphertext, key, iv);
+            send_message(client_socket, ciphertext, encrypted_len);
+            break;
+        } else {
+            attempts++;
+            if (attempts == maximum_attempts) {
+                encrypted_len = encrypt((unsigned char *)"Authentication failed. Too many attempts.", ciphertext, key, iv);
+                send_message(client_socket, ciphertext, encrypted_len);
+                printf("Client %d: Authentication failed - max attempts\n", client_socket);
+            } else {
+                encrypted_len = encrypt((unsigned char *)"Authentication failed. Try again.", ciphertext, key, iv);
+                send_message(client_socket, ciphertext, encrypted_len);
+                printf("Client %d: Authentication failed - attempt %d\n", client_socket, attempts);
+                sleep(1);
+            }
+        }
+    }
+
+    close(client_socket);
+    free(arg);
+    return NULL;
+}
+
+int main() {
+    int server_fd;
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
+
+    printf("\n=== Secure Server Started ===\n");
+
+    // Create socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
 
-    //step2: configure server address
+    // Configure server address
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
-    // step3: Bind socket
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+    // Bind socket to address
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("Bind failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
-    // step4: Listen for connections
+    // Start listening
     if (listen(server_fd, 3) < 0) {
         perror("Listen failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
-
     printf("Server listening on port %d...\n", PORT);
-    
-    //step5:accept connection
-    if ((new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0) {
-        perror("Accept failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-    printf("Client connected\n");
 
-    // Send the key and IV to client
-    if (send(new_socket, key, 16, 0) != 16 || send(new_socket, iv, 16, 0) != 16) {
-        perror("Failed to send key/IV");
-        close(new_socket);
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-    printf("Sent encryption key and IV to client\n");
+    while(1) {
+        printf("\nWaiting for connection...\n");
 
-    //  Authentication loop 
-    while (attempts < maximum_attempts) {
-        //sends and receives encrypted username 
-        int encrypted_len = encrypt((unsigned char *)"Enter username: ", ciphertext, key, iv);
-        send_message(new_socket, ciphertext, encrypted_len);
-        int received_len = read_message(new_socket, buffer, BUFFER_SIZE, "Read username failed");
-        decrypt(buffer, received_len, username, key, iv);        
-        printf("Encrypted username received: ");
-        strToHex("", buffer, received_len);
-        printf("Decrypted username: %s\n", username);
+        // Accept client
+        int* new_socket = malloc(sizeof(int));
+        if ((*new_socket = accept(server_fd, (struct sockaddr *)&address, 
+                                (socklen_t*)&addrlen)) < 0) {
+            perror("Accept failed");
+            free(new_socket);
+            continue;
+        }
+        printf("New client connected\n");
 
-        // send and receive pasxsword
-        encrypted_len = encrypt((unsigned char *)"Enter password: ", ciphertext, key, iv);
-        send_message(new_socket, ciphertext, encrypted_len);
-        received_len = read_message(new_socket, buffer, BUFFER_SIZE, "Read password failed");
-        decrypt(buffer, received_len, password, key, iv);
-        printf("Encrypted password received: ");
-        strToHex("", buffer, received_len);
-        printf(" Decrypted password: %s\n", password);
-
-        // Check credentials
-        if (authenticate(username, password)) {
-            encrypted_len = encrypt((unsigned char *)"Authentication successful", ciphertext, key, iv);
-            send_message(new_socket, ciphertext, encrypted_len);
-            printf("Sent auth success message (encrypted)\n");
-
-            // Read and decrypt final client message
-            received_len = read_message(new_socket, buffer, BUFFER_SIZE, "Read client message");
-            decrypt(buffer, received_len, decrypted_message, key, iv);
-            printf("Encrypted message: "); strToHex("", buffer, received_len);
-            printf("Decrypted message: %s\n", decrypted_message);
-
-            encrypted_len = encrypt((unsigned char *)"Message received", ciphertext, key, iv);
-            send_message(new_socket, ciphertext, encrypted_len);
-            break;
-        } else {
-            attempts++;
-            if (attempts == maximum_attempts) {
-                encrypted_len = encrypt((unsigned char *)"Authentication failed. Too many attempts.", ciphertext, key, iv);
-                send_message(new_socket, ciphertext, encrypted_len);
-                printf("authentication failed - too many attempts\n");
-                close(new_socket);
-                close(server_fd);
-                return 0;
-            } else {
-                encrypted_len = encrypt((unsigned char *)"Authentication failed. Try again.", ciphertext, key, iv);
-                send_message(new_socket, ciphertext, encrypted_len);
-                sleep(1); // Prevent message merge
-                printf("authentication failed - attempt %d\n", attempts);
-            }
+        // Create thread for this client
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, handle_client, new_socket) != 0) {
+            perror("Thread creation failed");
+            free(new_socket);
+            close(*new_socket);
+            continue;
         }
     }
 
-    //step8: close connection
-    close(new_socket);
     close(server_fd);
     return 0;
 }
