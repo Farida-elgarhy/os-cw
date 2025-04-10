@@ -123,7 +123,7 @@ int decrypt_gcm(unsigned char *enc_buf, int enc_len,
     return total_len;
 }
 
-void *handle_client(void *arg) {
+void *client_handling(void *arg) {
     int client_fd = *(int *)arg;
     free(arg);
 
@@ -138,6 +138,8 @@ void *handle_client(void *arg) {
     int attempts = 0;
     const int maximum_attempts = 3;
     char log[BUFFER_SIZE * 4] = {0};
+
+
 
     snprintf(log, sizeof(log), "\n\n======= New client connected: Client #%d =======\n", client_id);
 
@@ -275,7 +277,7 @@ int main() {
         }
 
         pthread_t tid;
-        pthread_create(&tid, NULL, handle_client, client_fd);
+        pthread_create(&tid, NULL, client_handling, client_fd);
         pthread_detach(tid);
     }
 
