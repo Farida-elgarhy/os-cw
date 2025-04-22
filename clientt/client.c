@@ -211,6 +211,13 @@ int main() {
             printf("Server: %s\n", dec_buf);
 
             continue;
+        } else if (choice[0] == '3') {
+            // NEW: Receive role-based Files menu from server
+            enc_len = read_message(sock, buffer, "file menu recv");
+            read_message(sock, tag, "file menu tag");
+            decrypt_gcm(buffer, enc_len, tag, key, iv, dec_buf);
+            printf("\n%s", dec_buf);
+            continue;
         } else {                             
             enc_len = read_message(sock, buffer, "invalid resp");
             read_message(sock, tag, "invalid tag");

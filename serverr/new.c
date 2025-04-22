@@ -15,7 +15,6 @@
 
 int client_counter = 0;
 pthread_mutex_t counter_lock;
-//pthread_mutex_t log_lock;
 
 void send_message(int socket, unsigned char *data, int len) {
     uint32_t net_len = htonl(len);
@@ -47,26 +46,31 @@ void convert_to_hex(const unsigned char *in, size_t len, char *out) {
     out[len * 2] = '\0';
 }
 
-void print_hex(const char *label, unsigned char *data, int len) {
-    printf("%s: ", label);
-    for (int i = 0; i < len; i++) printf("%02X", data[i]);
-    printf("\n");
+void print_hex(char *log, const char *label, unsigned char *data, int len) {
+    char hex[BUFFER_SIZE * 2];
+    int pos = 0;
+    pos += snprintf(hex, sizeof(hex), "%s", label);
+    for (int i = 0; i < len; i++) {
+        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X", data[i]);
+    }
+    snprintf(log + strlen(log), BUFFER_SIZE * 4 - strlen(log), "%s\n", hex);
 }
 
-int authenticate(const char username[], const char password[]) {
+int authenticate(const char username[], const char password[], char *role_out) {
     FILE *file = fopen("credentials.txt", "r");
     if (!file) return 0;
 
-    char line[BUFFER_SIZE], stored_user[50], stored_salt[33], stored_hash[65], computed_hash[65];
+    char line[BUFFER_SIZE], stored_user[50], stored_salt[33], stored_hash[65], computed_hash[65], stored_role[20];
 
     while (fgets(line, sizeof(line), file)) {
-        sscanf(line, "%s %s %s", stored_user, stored_salt, stored_hash);
+        sscanf(line, "%s %s %s %s", stored_user, stored_salt, stored_hash, stored_role);
         if (strcmp(username, stored_user) == 0) {
             char salted[512];
             unsigned char hash[HASH_LENGTH];
             sprintf(salted, "%s%s", stored_salt, password);
             SHA256((unsigned char *)salted, strlen(salted), hash);
             convert_to_hex(hash, HASH_LENGTH, computed_hash);
+            strcpy(role_out, stored_role);
             fclose(file);
             return strcmp(computed_hash, stored_hash) == 0;
         }
@@ -120,10 +124,10 @@ int decrypt_gcm(unsigned char *enc_buf, int enc_len,
     return total_len;
 }
 
-void *handle_client(void *arg) {
+void *client_handling(void *arg) {
     int client_fd = *(int *)arg;
     free(arg);
-    //pthread_mutex_lock(&log_lock);
+
     int client_id;
     pthread_mutex_lock(&counter_lock);
     client_id = ++client_counter;
@@ -131,11 +135,14 @@ void *handle_client(void *arg) {
 
     unsigned char key[32], iv[12], tag[16];
     unsigned char buffer[BUFFER_SIZE], dec_buf[BUFFER_SIZE];
-    char username[50], password[50];
+    char username[50], password[50], role[20];
     int attempts = 0;
     const int maximum_attempts = 3;
+    char log[BUFFER_SIZE * 4] = {0};
 
-    printf("\n\n======= New client connected: Client #%d =======\n\n", client_id);
+
+
+    snprintf(log, sizeof(log), "\n\n======= New client connected: Client #%d =======\n", client_id);
 
     RAND_bytes(key, sizeof(key));
     RAND_bytes(iv, sizeof(iv));
@@ -150,9 +157,9 @@ void *handle_client(void *arg) {
 
         len = read_message(client_fd, buffer, "received username");
         read_message(client_fd, tag, "received tag");
-        print_hex("Client's Encrypted Username", buffer, len);
+        print_hex(log, "Encrypted Username: ", buffer, len);
         decrypt_gcm(buffer, len, tag, key, iv, (unsigned char *)username);
-        printf("Client's Decrypted Username: %s\n", username);
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "Decrypted Username: %s\n", username);
 
         len = encrypt_gcm((unsigned char *)"Enter password: ", 16, key, iv, buffer, tag);
         send_message(client_fd, buffer, len);
@@ -160,21 +167,18 @@ void *handle_client(void *arg) {
 
         len = read_message(client_fd, buffer, "received password");
         read_message(client_fd, tag, "received tag");
-        print_hex("Client's Encrypted Password", buffer, len);
+        print_hex(log, "Encrypted Password: ", buffer, len);
         decrypt_gcm(buffer, len, tag, key, iv, (unsigned char *)password);
-        printf("Client's Decrypted Password: %s\n", password);
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "Decrypted Password: %s\n", password);
 
-        if (authenticate(username, password)) {
-            printf("Client authenticated successfully\n");
+        if (authenticate(username, password, role)) {
+            snprintf(log + strlen(log), sizeof(log) - strlen(log), "Authentication successful\n");
             len = encrypt_gcm((unsigned char *)"Authentication successful", 26, key, iv, buffer, tag);
             send_message(client_fd, buffer, len);
             send_message(client_fd, tag, 16);
 
             while (1) {
-                const char *menu =
-                    "Choose an option:\n"
-                    "1) Exit\n"
-                    "2) Send a message\n";
+                const char *menu = "Choose an option:\n1) Exit\n2) Send a message\n3) Files\n";
                 len = encrypt_gcm((unsigned char *)menu, strlen(menu), key, iv, buffer, tag);
                 send_message(client_fd, buffer, len);
                 send_message(client_fd, tag, 16);
@@ -184,7 +188,7 @@ void *handle_client(void *arg) {
                 decrypt_gcm(buffer, len, tag, key, iv, dec_buf);
 
                 if (dec_buf[0] == '1') {
-                    printf("Client chose exit.\n");
+                    snprintf(log + strlen(log), sizeof(log) - strlen(log), "Chose exit\n");
                     break;
                 } else if (dec_buf[0] == '2') {
                     const char *prompt = "Enter your message:";
@@ -195,32 +199,79 @@ void *handle_client(void *arg) {
                     len = read_message(client_fd, buffer, "received message");
                     read_message(client_fd, tag, "received tag");
                     decrypt_gcm(buffer, len, tag, key, iv, dec_buf);
-                    printf("Client's Decrypted Message: %s\n", dec_buf);
+
+                    char temp[BUFFER_SIZE + 64];
+                    snprintf(temp, sizeof(temp), "Message: %s\n", dec_buf);
+                    strncat(log, temp, sizeof(log) - strlen(log) - 1);
 
                     const char *ack = "Message received.";
                     len = encrypt_gcm((unsigned char *)ack, strlen(ack), key, iv, buffer, tag);
                     send_message(client_fd, buffer, len);
                     send_message(client_fd, tag, 16);
                     continue;
-                } else {
+                } else if (dec_buf[0] == '3') {
+                    if (strcmp(role, "Entry") == 0) {
+                        const char *entry_menu = 
+                            "\n[Files - Entry Level]\n"
+                            "1. List files\n"
+                            "2. Read file content\n"
+                            "3. Back to main menu\n";
+                        len = encrypt_gcm((unsigned char *)entry_menu, strlen(entry_menu), key, iv, buffer, tag);
+                        send_message(client_fd, buffer, len);
+                        send_message(client_fd, tag, 16);
+                    } else if (strcmp(role, "Medium") == 0) {
+                        const char *medium_menu = 
+                            "\n[Files - Medium Level]\n"
+                            "1. List files\n"
+                            "2. Read file content\n"
+                            "3. Edit file\n"
+                            "4. Copy file\n"
+                            "5. Back to main menu\n";
+                        len = encrypt_gcm((unsigned char *)medium_menu, strlen(medium_menu), key, iv, buffer, tag);
+                        send_message(client_fd, buffer, len);
+                        send_message(client_fd, tag, 16);
+                    } else if (strcmp(role, "Top") == 0) {
+                        const char *top_menu = 
+                            "\n[Files - Top Level]\n"
+                            "1. List files\n"
+                            "2. Read file content\n"
+                            "3. Edit file\n"
+                            "4. Copy file\n"
+                            "5. Move file\n"
+                            "6. Delete file\n"
+                            "7. Rename file\n"
+                            "8. Upload file\n"
+                            "9. Create directory\n"
+                            "10. Delete directory\n"
+                            "11. Back to main menu\n";
+                        len = encrypt_gcm((unsigned char *)top_menu, strlen(top_menu), key, iv, buffer, tag);
+                        send_message(client_fd, buffer, len);
+                        send_message(client_fd, tag, 16);
+                    } else {
+                        const char *error = "Role not recognized.";
+                        len = encrypt_gcm((unsigned char *)error, strlen(error), key, iv, buffer, tag);
+                        send_message(client_fd, buffer, len);
+                        send_message(client_fd, tag, 16);
+                    }
+                    continue;
+                }else {
                     const char *bad = "Invalid choice. Please try again.";
                     len = encrypt_gcm((unsigned char *)bad, strlen(bad), key, iv, buffer, tag);
                     send_message(client_fd, buffer, len);
                     send_message(client_fd, tag, 16);
-                    printf("Client sent invalid option. Resending menu...\n");
-                    continue; 
+                    snprintf(log + strlen(log), sizeof(log) - strlen(log), "Sent invalid option. Resending menu...\n");
+                    continue;
                 }
             }
-
-            break; 
+            break;
         } else {
             attempts++;
-            printf("Client authentication failed - attempt %d\n", attempts);
+            snprintf(log + strlen(log), sizeof(log) - strlen(log), "Authentication failed - attempt %d\n", attempts);
             if (attempts == maximum_attempts) {
                 len = encrypt_gcm((unsigned char *)"Authentication failed. Too many attempts.", 44, key, iv, buffer, tag);
                 send_message(client_fd, buffer, len);
                 send_message(client_fd, tag, 16);
-                printf("Client disconnected after max attempts\n");
+                snprintf(log + strlen(log), sizeof(log) - strlen(log), "Disconnected after max attempts\n");
                 break;
             } else {
                 len = encrypt_gcm((unsigned char *)"Authentication failed. Try again.", 36, key, iv, buffer, tag);
@@ -231,33 +282,32 @@ void *handle_client(void *arg) {
         }
     }
 
+    pthread_mutex_lock(&counter_lock);
+    printf("%s", log);
+    pthread_mutex_unlock(&counter_lock);
+
     close(client_fd);
-    //pthread_mutex_unlock(&log_lock);
     return NULL;
 }
 
 int main() {
     int server_fd;
     struct sockaddr_in address;
-    socklen_t addrlen = sizeof(address); 
+    socklen_t addrlen = sizeof(address);
 
+    pthread_mutex_init(&counter_lock, NULL);
     printf("\n=== Secure Server with Multithreading Started ===\n");
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
-
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
-
     bind(server_fd, (struct sockaddr *)&address, sizeof(address));
     listen(server_fd, MAX_CLIENTS);
-
     printf("Listening on port %d...\n", PORT);
-
-    pthread_mutex_init(&counter_lock, NULL);
     while (1) {
         int *client_fd = malloc(sizeof(int));
         *client_fd = accept(server_fd, (struct sockaddr *)&address, &addrlen);
@@ -268,13 +318,11 @@ int main() {
         }
 
         pthread_t tid;
-        pthread_create(&tid, NULL, handle_client, client_fd);
+        pthread_create(&tid, NULL, client_handling, client_fd);
         pthread_detach(tid);
     }
 
-
     pthread_mutex_destroy(&counter_lock);
-    //pthread_mutex_lock(&log_lock);
     close(server_fd);
     return 0;
 }
